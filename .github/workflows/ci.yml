@@ -1,0 +1,308 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact commit without actions
+        shell: bash
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify CLI contract basics
+        shell: bash
+        run: |
+          build/impact-trace --help > cli-help.txt
+          grep -q 'impact-trace analyze' cli-help.txt
+          grep -qi 'never launches' cli-help.txt
+          grep -q 'changed paths: stdin' cli-help.txt
+          build/impact-trace --version | grep -q '^impact-trace '
+
+          set +e
+          build/impact-trace >/dev/null 2>cli-no-command.err
+          no_command=$?
+          build/impact-trace bogus >/dev/null 2>cli-bogus.err
+          bogus=$?
+          build/impact-trace analyze --bogus >/dev/null 2>cli-unknown.err
+          unknown=$?
+          build/impact-trace analyze --project-root . --project-root . >/dev/null 2>cli-repeat.err
+          repeated=$?
+          build/impact-trace analyze --dep-root build >/dev/null 2>cli-dep-root.err
+          dep_root=$?
+          build/impact-trace analyze . --project-root . >/dev/null 2>cli-root-conflict.err
+          root_conflict=$?
+          build/impact-trace analyze . --build build --build-root build >/dev/null 2>cli-build-conflict.err
+          build_conflict=$?
+          set -e
+
+          test "$no_command" -eq 64
+          test "$bogus" -eq 64
+          test "$unknown" -eq 64
+          test "$repeated" -eq 64
+          test "$dep_root" -eq 64
+          test "$root_conflict" -eq 64
+          test "$build_conflict" -eq 64
+
+      - name: Generate controlled fixture metadata externally
+        shell: bash
+        run: |
+          cmake -E make_directory fixture/build/.cmake/api/v1/query
+          cmake -E touch fixture/build/.cmake/api/v1/query/codemodel-v2
+          cmake -S fixture -B fixture/build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build fixture/build --parallel 2
+          ctest --test-dir fixture/build --show-only=json-v1 > fixture/build/ctest-info.json
+          find fixture/build -type f -name '*.o.d' -printf '%P\n' | sort > fixture/build/deps.txt
+          printf 'include/alpha.hpp\n' > fixture/changed.txt
+
+      - name: Verify real selective analysis
+        shell: bash
+        run: |
+          set +e
+          output=$(build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps.txt \
+            --format names 2>fixture/build/selective.err)
+          status=$?
+          set -e
+          test "$status" -eq 0
+          test "$output" = 'AlphaTest'
+
+      - name: Verify stdin and file input are equivalent
+        shell: bash
+        run: |
+          file_output=$(build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps.txt \
+            --format names)
+          stdin_output=$(printf 'include/alpha.hpp\n' | build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files - \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps.txt \
+            --format names)
+          test "$file_output" = "$stdin_output"
+          test "$stdin_output" = 'AlphaTest'
+
+      - name: Verify shorthand defaults and legacy equivalence
+        shell: bash
+        run: |
+          explicit=$(build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps.txt \
+            --format names)
+
+          shorthand=$(printf 'include/alpha.hpp\n' | build/impact-trace analyze "$(pwd)/fixture" --format names)
+          alias_form=$(printf 'include/alpha.hpp\n' | build/impact-trace analyze "$(pwd)/fixture" --build "$(pwd)/fixture/build" --format names)
+          file_override=$(build/impact-trace analyze "$(pwd)/fixture" --changed-files fixture/changed.txt --format names)
+
+          test "$explicit" = 'AlphaTest'
+          test "$shorthand" = "$explicit"
+          test "$alias_form" = "$explicit"
+          test "$file_override" = "$explicit"
+
+          set +e
+          printf 'include/alpha.hpp\n' | build/impact-trace analyze "$(pwd)/fixture" \
+            --ctest-info fixture/build/missing-default-catalogue.json \
+            --format names >/tmp/missing-default.out 2>/tmp/missing-default.err
+          status=$?
+          set -e
+          test "$status" -eq 11
+          test ! -s /tmp/missing-default.out
+          grep -q 'FULL_SUITE_REQUIRED: CTest catalogue not found at' /tmp/missing-default.err
+
+      - name: Verify real shared-header multi-test selection
+        shell: bash
+        run: |
+          printf 'include/features_shared.hpp\n' > fixture/changed-shared.txt
+          set +e
+          output=$(build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed-shared.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps.txt \
+            --format names 2>fixture/build/shared.err)
+          status=$?
+          set -e
+          test "$status" -eq 0
+          test "$output" = $'AlphaTest\nBetaTest'
+
+      - name: Verify byte-stable deterministic output
+        shell: bash
+        run: |
+          sort -r fixture/build/deps.txt > fixture/build/deps-reversed.txt
+          printf 'include/alpha.hpp\ninclude/alpha.hpp\n' > fixture/changed-duplicates.txt
+
+          build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps.txt \
+            --format human --explain \
+            > fixture/build/deterministic-a.out 2> fixture/build/deterministic-a.err
+
+          build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed-duplicates.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps-reversed.txt \
+            --format human --explain \
+            > fixture/build/deterministic-b.out 2> fixture/build/deterministic-b.err
+
+          cmp fixture/build/deterministic-a.out fixture/build/deterministic-b.out
+          cmp fixture/build/deterministic-a.err fixture/build/deterministic-b.err
+
+          for iteration in $(seq 1 20); do
+            build/impact-trace analyze \
+              --project-root "$(pwd)/fixture" \
+              --build-root "$(pwd)/fixture/build" \
+              --changed-files fixture/changed.txt \
+              --cmake-reply fixture/build/.cmake/api/v1/reply \
+              --ctest-info fixture/build/ctest-info.json \
+              --dep-list fixture/build/deps.txt \
+              --format human --explain \
+              > fixture/build/repeat.out 2> fixture/build/repeat.err
+            cmp fixture/build/deterministic-a.out fixture/build/repeat.out
+            cmp fixture/build/deterministic-a.err fixture/build/repeat.err
+          done
+
+      - name: Verify real missing-evidence fallback
+        shell: bash
+        run: |
+          grep -v 'CMakeFiles/alpha.dir/' fixture/build/deps.txt > fixture/build/deps-incomplete.txt
+          set +e
+          output=$(build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps-incomplete.txt \
+            --format names 2>fixture/build/fallback.err)
+          status=$?
+          set -e
+          test "$status" -eq 10
+          test "$output" = $'AlphaTest\nBetaTest\nCoreTest'
+
+      - name: Verify missing catalogue behavior
+        shell: bash
+        run: |
+          set +e
+          output=$(build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/missing-ctest.json \
+            --dep-list fixture/build/deps.txt \
+            --format names 2>fixture/build/missing-catalogue.err)
+          status=$?
+          set -e
+          test "$status" -eq 11
+          test -z "$output"
+
+      - name: Verify empty changed input is rejected
+        shell: bash
+        run: |
+          : > fixture/changed-empty.txt
+          set +e
+          build/impact-trace analyze \
+            --project-root "$(pwd)/fixture" \
+            --build-root "$(pwd)/fixture/build" \
+            --changed-files fixture/changed-empty.txt \
+            --cmake-reply fixture/build/.cmake/api/v1/reply \
+            --ctest-info fixture/build/ctest-info.json \
+            --dep-list fixture/build/deps.txt \
+            --format names >/dev/null 2>fixture/build/empty.err
+          status=$?
+          set -e
+          test "$status" -eq 64
+
+      - name: Audit runtime subprocess APIs
+        shell: bash
+        run: |
+          if grep -nE '\b(system|popen|pclose|fork|exec[lvpe]*|posix_spawn)\s*\(' impact_trace.cpp; then
+            echo 'Unexpected process-spawn API found in runtime source.' >&2
+            exit 1
+          fi
+
+      - name: Show dynamic runtime linkage
+        shell: bash
+        run: ldd build/impact-trace | tee runtime-linkage.txt
+
+      - name: Verify clean release build and reproducibility
+        shell: bash
+        run: |
+          cmake -S . -B release-a -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build release-a --parallel 2
+          cmake -S . -B release-b -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build release-b --parallel 2
+          sha256sum release-a/impact-trace release-b/impact-trace | tee reproducible-build-sha256.txt
+          cmp release-a/impact-trace release-b/impact-trace
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact commit without actions
+        shell: bash
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Configure ASan and UBSan build
+        shell: bash
+        run: |
+          cmake -S . -B build-sanitize \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+            -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+
+      - name: Build sanitized tests
+        run: cmake --build build-sanitize --parallel 2
+
+      - name: Run sanitized tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-sanitize --output-on-failure

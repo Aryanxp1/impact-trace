@@ -1,0 +1,14 @@
+# Build outputs
+build/
+release-build/
+fixture/build/
+
+# Generated demo input
+fixture/changed.txt
+
+# Release artifacts
+impact-trace-linux-x86_64
+*.exe
+*.obj
+*.o
+SHA256SUMS.txt
