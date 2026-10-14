@@ -14,9 +14,9 @@
 
 Select only the tests your build evidence can actually justify — and widen safely when that evidence is incomplete.
 
-**Maintained by Aryan Vishwakarma · Conservative C++ Test Impact Selection**
+**Maintained by Aryan Vishwakarma · High-Performance C++20 Test Impact Analysis**
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Safety model](#safety-model) · [Verification](#verification) · [Package Killer](#package-killer) · [Docs](#documentation)
+[Quick start](#quick-start) · [How it works](#how-it-works) · [C++ Engineering Highlights](#key-technical-features-c20-engineering) · [Safety model](#safety-model) · [Verification](#verification) · [Docs](#documentation)
 
 </div>
 
@@ -24,20 +24,34 @@ Select only the tests your build evidence can actually justify — and widen saf
 
 ## Why impact-trace?
 
-Large C++ projects often face a bad tradeoff:
+Large C++ codebases face a major productivity bottleneck in continuous integration (CI):
 
-- **Run everything** — safe, but potentially expensive.
-- **Guess what changed** — fast, but a false negative can hide a regression.
+- **Run everything** — 100% safe, but wastes immense compute and developer turnaround time on large monolithic builds.
+- **Guess what changed** — fast, but naive diff-matching can silently skip tests and leak critical regressions into production.
 
-`impact-trace` takes a stricter approach:
+`impact-trace` solves this with a conservative, evidence-driven test-impact selection model:
 
-> **A test is omitted only when the available build evidence justifies omitting it.**
+> **A test is omitted only when verifiable compiler and build dependency evidence proves it is unaffected.**
 
-It reads metadata your existing toolchain already produced, builds an explainable impact graph, and selects the affected CTest tests. If the evidence becomes missing, malformed, stale, ambiguous, or unsupported, the result widens instead of guessing.
+It connects changed source files directly to translation units, CMake target dependencies, and CTest test executables. If dependency evidence is incomplete, stale, malformed, or ambiguous, the selection safely widens to the entire test suite.
 
-### What it does not do
+---
 
-`impact-trace` does **not** run tests and does **not** launch Git, CMake, CTest, a compiler, Python, a shell, a network service, or another executable at runtime.
+## Key Technical Features (C++20 Engineering)
+
+- **Pure C++20 Standard Library (Zero Third-Party Dependencies):** Built without Boost, LLVM, or external libraries. The entire runtime engine is contained within a high-performance, single-file translation unit (`impact_trace.cpp`).
+- **Custom Recursive-Descent JSON Parser:** Implements a strict JSON parser with UTF-8 verification, surrogate-pair decoding, duplicate-key rejection, exact byte/line/column diagnostic offsets, and recursive depth bounds.
+- **Compiler Dependency File Scanner:** Custom tokenizer and parser for GCC/Clang Make-style `.d` dependency rules supporting line continuations, escaping, and deterministic deduplication.
+- **DAG & Reverse Dependency Propagation:** Ingests CMake File API codemodel v2 to build an in-memory directed target dependency graph, computing reverse reachability sets to identify all indirectly affected downstream executables.
+- **Deterministic Timestamp Staleness Auditing:** Inspects prerequisite file modification times against `.d` artifacts to detect stale build metadata before trusting impact conclusions.
+- **Fail-Safe Conservative Contract:** Guarantees zero false negatives: any missing, unmapped, ambiguous, or stale build evidence automatically falls back to full test suite execution (`FULL_SUITE_SELECTED` / `FULL_SUITE_REQUIRED`).
+- **Comprehensive Verification Suite:** Tested across 7 dedicated test suites covering JSON grammar edge cases, graph cycles/diamonds, stress testing up to 10,000 prerequisites, and cross-platform path normalization.
+
+---
+
+### Runtime Non-Invocative Architecture
+
+`impact-trace` does **not** run tests and does **not** launch Git, CMake, CTest, a compiler, Python, a shell, a network service, or child processes at runtime. It operates as a pure data-pipeline consumer of existing build metadata.
 
 ---
 
