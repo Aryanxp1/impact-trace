@@ -6,6 +6,7 @@
 
 <br />
 
+[![CI](https://github.com/Aryanxp1/impact-trace/actions/workflows/ci.yml/badge.svg)](https://github.com/Aryanxp1/impact-trace/actions/workflows/ci.yml)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-zero-00b894)
 ![Single File](https://img.shields.io/badge/runtime%20implementation-single%20file-6c5ce7)
