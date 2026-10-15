@@ -58,9 +58,7 @@ It connects changed source files directly to translation units, CMake target dep
 
 ## How it works
 
-<p align="center">
-  <img src="assets/impact-trace-workflow.png" alt="How impact-trace maps changed paths to affected CTest tests" width="100%" />
-</p>
+
 
 ```text
 changed path
