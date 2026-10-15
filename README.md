@@ -2,7 +2,7 @@
 
 # ImpactTrace
 
-<img src="assets/impact-trace-hero.png" alt="ImpactTrace — zero-runtime-dependency test impact analysis for CMake/CTest" width="100%" />
+
 
 <br />
 
